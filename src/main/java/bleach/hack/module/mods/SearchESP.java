@@ -1,73 +1,75 @@
 package bleach.hack.module.mods;
 
-import bleach.hack.event.events.*;
+import bleach.hack.event.events.EventLoadChunk;
+import bleach.hack.event.events.EventReadPacket;
+import bleach.hack.event.events.EventUnloadChunk;
+import bleach.hack.event.events.EventWorldRender;
 import bleach.hack.module.Category;
 import bleach.hack.module.Module;
 import bleach.hack.setting.base.SettingSlider;
 import bleach.hack.setting.base.SettingToggle;
 import bleach.hack.utils.BleachLogger;
 import bleach.hack.utils.RenderUtils;
+import bleach.hack.utils.file.BleachFileMang;
 import com.google.common.eventbus.Subscribe;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.network.Packet;
-import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
-import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
-import net.minecraft.network.packet.s2c.play.ChunkDataS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.util.registry.DynamicRegistryManager;
 import net.minecraft.util.registry.Registry;
-import net.minecraft.world.biome.source.BiomeArray;
-import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.WorldChunk;
 import net.minecraft.world.dimension.DimensionType;
 import org.lwjgl.opengl.GL11;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Stack;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.SynchronousQueue;
 
-public class PortalESP extends Module
+public class SearchESP extends Module
 {
-    private final HashMap<DimensionType, ArrayBlockingQueue<BlockPos>> portals = new HashMap<DimensionType, ArrayBlockingQueue<BlockPos>>();
+    private final HashMap<DimensionType, ArrayBlockingQueue<BlockPos>> blocks = new HashMap<DimensionType, ArrayBlockingQueue<BlockPos>>();
     // Man, race condition is killing me wtf
     public Vec3d prevPos;
     private double[] rPos;
     private final Stack<WorldChunk> chunkStack = new Stack<>(); // Lol stacks is so cool
     private boolean running;
 
-    public PortalESP()
+    private final Set<Block> highlightBlocks = new HashSet<>();
+
+
+    public SearchESP()
     {
-        super("PortalESP", KEY_UNBOUND, Category.RENDER, "ESP for portals (laggy with high range)",
-                new SettingSlider("Range", 0, 125, 75, 0),
+        super("SearchESP", KEY_UNBOUND, Category.RENDER, "ESP for blocks",
                 new SettingSlider("R: ", 0.0D, 255.0D, 115.0D, 0),
                 new SettingSlider("G: ", 0.0D, 255.0D, 0.0D, 0),
                 new SettingSlider("B: ", 0.0D, 255.0D, 255.0D, 0),
-                new SettingSlider("Tick Delay", 1, 20, 10, 0),
                 new SettingToggle("Debug", false)
         );
         new Thread(this::chunkyBoi).start();
     }
 
+    public void setHighlight(Block... blocks) {
+        Collections.addAll(this.highlightBlocks, blocks);
+    }
+
     private boolean shown(BlockPos pos, DimensionType d) {
-        ArrayBlockingQueue<BlockPos> booga = portals.get(d);
+        ArrayBlockingQueue<BlockPos> booga = blocks.get(d);
         if (booga == null) {
-            portals.put(d, new ArrayBlockingQueue<BlockPos>(65455));
+            blocks.put(d, new ArrayBlockingQueue<BlockPos>(65455));
             return shown(pos, d);
         }
-        for(BlockPos p : portals.get(d)) {
+        for(BlockPos p : blocks.get(d)) {
             if (p.equals(pos))
                 return true;
         }
         return false;
     }
+
+
 
     private void chunkyBoi() {
         while (true) {
@@ -82,8 +84,8 @@ public class PortalESP extends Module
                         for (int k = 0; k < 255; k++) {
                             BlockPos pos = new BlockPos(cPos.x * 16 + i, k, cPos.z * 16 + j);
                             BlockState state = chunk.getBlockState(pos);
-                            if (state.getBlock().is(Blocks.NETHER_PORTAL) && !shown(pos, mc.world.getDimension()))
-                                portals.get(mc.world.getDimension()).add(pos);
+                            if (this.highlightBlocks.contains(state.getBlock()) && !shown(pos, mc.world.getDimension()))
+                                blocks.get(mc.world.getDimension()).add(pos);
                         }
                     }
                 }
@@ -100,16 +102,16 @@ public class PortalESP extends Module
                 if (mc.player == null)
                     return;
                 DimensionType dimension = mc.player.world.getDimension();
-                if (portals.containsKey(dimension)) {
+                if (blocks.containsKey(dimension)) {
                     if (shown(bp, dimension)) {
-                        if (!bs.getBlock().is(Blocks.NETHER_PORTAL))
-                            this.portals.get(dimension).remove(bp);
+                        if (!this.highlightBlocks.contains(bs.getBlock()))
+                            this.blocks.get(dimension).remove(bp);
                     } else {
-                        if (bs.getBlock().is(Blocks.NETHER_PORTAL))
-                            this.portals.get(dimension).add(new BlockPos(bp.getX(), bp.getY(), bp.getZ())); // do not event touch it
+                        if (this.highlightBlocks.contains(bs.getBlock()))
+                            this.blocks.get(dimension).add(new BlockPos(bp.getX(), bp.getY(), bp.getZ())); // do not event touch it
                     }
                 } else {
-                    portals.put(dimension, new ArrayBlockingQueue<BlockPos>(65455));
+                    blocks.put(dimension, new ArrayBlockingQueue<BlockPos>(65455));
                 }
             });
         }
@@ -122,9 +124,13 @@ public class PortalESP extends Module
     }
 
     @Subscribe
+    public void chunkUnloaded(EventUnloadChunk e) {
+
+    }
+
+    @Subscribe
     public void onRender(EventWorldRender event) {
-        if (!isToggled()) // Temp fix lmao, idk why is that even called when disabled.
-            return;  // Also when enabled chunks need to be reloaded in the way so they can get to chunkyBoi thread
+        if (!isToggled()) return;
 
         GL11.glPushMatrix();
         GL11.glBlendFunc(770, 771);
@@ -143,7 +149,7 @@ public class PortalESP extends Module
         if (red > 1.0F)
             red = 1.0F - red;
 
-        ArrayBlockingQueue<BlockPos> portals = this.portals.get(mc.player.world.getDimension());
+        ArrayBlockingQueue<BlockPos> portals = this.blocks.get(mc.player.world.getDimension());
         if (portals != null) {
             for (BlockPos p : portals)
                 if (mc.player.getPos().distanceTo(Vec3d.ofCenter(p)) < 128) // put max range here
@@ -159,25 +165,28 @@ public class PortalESP extends Module
 
     public void drawFilledBlockBox(BlockPos blockPos, float r, float g, float b, float a)
     {
-        double x = blockPos.getX();
-        double y = blockPos.getY();
-        double z = blockPos.getZ();
 
-        float or = (float) (this.getSettings().get(1).asSlider().getValue() / 255.0D);
-        float og = (float) (this.getSettings().get(2).asSlider().getValue() / 255.0D);
-        float ob = (float) (this.getSettings().get(3).asSlider().getValue() / 255.0D);
-        if (getSetting(5).asToggle().state) {
-            BleachLogger.infoMessage(this.mc.world.getBlockState(new BlockPos(x,y,z)).getEntries().toString());
+        float or = (float) (this.getSettings().get(0).asSlider().getValue() / 255.0D);
+        float og = (float) (this.getSettings().get(1).asSlider().getValue() / 255.0D);
+        float ob = (float) (this.getSettings().get(2).asSlider().getValue() / 255.0D);
+        if (getSetting(3).asToggle().state) {
+            BleachLogger.infoMessage(this.mc.world.getBlockState(blockPos).getEntries().toString());
         }
-        if (this.mc.world.getBlockState(new BlockPos(x,y,z)).getEntries().toString().contains("values=[x, z]}=x")) {
-                RenderUtils.drawFilledBox(new Box(x, y, z + 0.5D, x + 1.0D, y + 1.0D, z + 0.5D), or, og, ob, a);
-                RenderUtils.drawFilledBox(new Box(x, y, z + 0.5D, x + 1.0D, y + 1.0D, z + 0.5D), or, og, ob, a * 1.5F);
-        } else {
-                RenderUtils.drawFilledBox(new Box(x + 0.5D, y, z, x + 0.5D, y + 1.0D, z + 1.0D), or, og, ob, a);
-                RenderUtils.drawFilledBox(new Box(x + 0.5D, y, z, x + 0.5D, y + 1.0D, z + 1.0D), or, og, ob, a * 1.5F);
-        }
+        RenderUtils.drawOutlineBox(blockPos,
+                or,
+                og,
+                ob,
+                1f);
     }
     public void onDisable () {
-        portals.clear();
+        blocks.clear();
+    }
+
+    @Override
+    public void onEnable() {
+        super.onEnable();
+        for (String s : BleachFileMang.readFileLines("searchblocks.txt")) {
+            setHighlight(Registry.BLOCK.get(new Identifier(s)));
+        }
     }
 }
